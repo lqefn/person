@@ -1,5 +1,6 @@
 # encoding: utf-8
 import io
+import os
 import struct
 import ctypes
 import json
@@ -173,10 +174,6 @@ class DataInput(DataInputStream):
                 break
             b = self.read() & 0xFF
 
-#filename = "/Users/lqefn/Documents/code/spine-runtimes/spine-libgdx/spine-libgdx-tests/assets/spineboy/spineboy.skel"
-filename = "/Users/lqefn/Downloads/龟丞相/skeleton.skel"
-input = DataInput(filename)
-
 class Object(dict):
     def __getattr__(self, attr):
         try:
@@ -192,6 +189,7 @@ class Object(dict):
         try:
             del self[attr]
         except KeyError:
+            print("key:", attr)
             raise AttributeError, attr
 
 def readSkeletonData(input, scale):
@@ -271,13 +269,17 @@ def readSkeletonData(input, scale):
         skeletonData.slots[i] = slotData
 
     skeletonData.skins = {}
+    skeletonData.skinsList = []
     defaultSkin = readSkin(input, "default", nonessential, scale)
     if defaultSkin is not None:
         skeletonData.skins["default"] = defaultSkin
+        skeletonData.skinsList.append(defaultSkin)
 
     for i in range(input.readInt(True)):
         skinName = input.readString()
-        skeletonData.skins[skinName] = readSkin(input, skinName, nonessential, scale)
+        skin = readSkin(input, skinName, nonessential, scale)
+        skeletonData.skins[skinName] = skin
+        skeletonData.skinsList.append(skin)
 
     eventCount = input.readInt(True)
     print("eventCount:", eventCount)
@@ -306,13 +308,18 @@ def readSkin(input, name, nonessential, scale):
         return None
 
     skinData = Object()
+    skinData.attachments = []
 
     for i in range(slotCount):
         slotIndex = input.readInt(True)
         attachmentCount = input.readInt(True)
         for ii in range(attachmentCount):
             attachmentName = input.readString()
-            skinData[attachmentName] = {attachmentName: readAttachment(input, skinData, name, nonessential, scale)}
+            attachment = readAttachment(input, skinData, attachmentName, nonessential, scale)
+            attachment.slotIndex = slotIndex
+
+            skinData[attachmentName] = attachment
+            skinData.attachments.append(skinData[attachmentName])
     return skinData
     
 def readAttachment(input, skin, attachmentName, nonessential, scale):
@@ -427,6 +434,8 @@ def readAnimation(name, input, skeletonData, scale):
                             timeline.curvews.append(readCurve(input))          
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.frames[-1])
 
                 elif timelineType == TIMELINE_ATTACHMENT:
                     timeline = Object()
@@ -439,14 +448,19 @@ def readAnimation(name, input, skeletonData, scale):
                         timeline.attachments.append(input.readString())
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.frames[-1])
 
         # Bone timelines
         print("Bone timelines")
-        for i in range(input.readInt(True)):
+        boneTimelineCount = input.readInt(True)
+        for i in range(boneTimelineCount):
+            #print("bone timeline index:", i, boneTimelineCount)
             boneIndex = input.readInt(True)
             for ii in range(input.readInt(True)):
                 timelineType = input.readByte()
                 frameCount = input.readInt(True)
+                #print("frameCount:", frameCount)
                 if timelineType == TIMELINE_ROTATE:
                     timeline = Object()
                     timeline.times = []
@@ -460,6 +474,8 @@ def readAnimation(name, input, skeletonData, scale):
                             timeline.curvews.append(readCurve(input))   
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.times[-1])
 
                 elif timelineType == TIMELINE_TRANSLATE or timelineType == TIMELINE_SCALE:
                     timeline = Object()
@@ -476,6 +492,8 @@ def readAnimation(name, input, skeletonData, scale):
                             timeline.curvews.append(readCurve(input))   
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.times[-1])
 
                 elif timelineType == TIMELINE_FLIPX or timelineType == TIMELINE_FLIPY:
                     timeline = Object()
@@ -484,9 +502,11 @@ def readAnimation(name, input, skeletonData, scale):
                     timeline.flips = []
                     for frameIndex in range(frameCount):
                         timeline.times.append(input.readFloat())
-                        timeline.flips.append(input.readFloat())
+                        timeline.flips.append(input.readBoolean())
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.times[-1])
 
         # IK timelines.
         print("IK timelines.")
@@ -497,28 +517,31 @@ def readAnimation(name, input, skeletonData, scale):
             frameCount = input.readInt(True)
             timeline = Object()
             timeline.ikConstraintIndex = ikIndex
-            timeline.time = []
+            timeline.times = []
             timeline.mix = []
             timeline.bendDirection = []
             timeline.curvews = []
             for frameIndex in range(frameCount):
-                timeline.time.append(input.readFloat())
+                timeline.times.append(input.readFloat())
                 timeline.mix.append(input.readFloat())
                 timeline.bendDirection.append(input.readByte())
                 if frameIndex < frameCount - 1:
                     timeline.curvews.append(readCurve(input))   
 
             timelines.append(timeline)
+            if frameCount > 0:
+                duration = max(duration, timeline.times[-1])
 
         # FFD timelines.
         print("FFD timelines.")
         for i in range(input.readInt(True)):
             skinIndex = input.readInt(True)
-            skin = skeletonData.skins[skinIndex]
+            skin = skeletonData.skinsList[skinIndex]
             for ii in range(input.readInt(True)):
                 slotIndex = input.readInt(True)
                 for iii in range(input.readInt(True)):
                     attachmentName = input.readString()
+                    #print(attachmentName, [{"name": a.name, "slotIndex": a.slotIndex} for a in skin.attachments])
                     attachment = filter(lambda item: item.name == attachmentName and item.slotIndex == slotIndex, skin.attachments)[0]
                     #print("attachment:", attachment)
                     frameCount = input.readInt(True)
@@ -533,15 +556,15 @@ def readAnimation(name, input, skeletonData, scale):
 
                         vertexCount = 0
                         vertices = []
-                        if attachment.attachment.type == "mesh":
-                            vertexCount = len(attachment.attachment.vertices)
+                        if attachment.type == "mesh":
+                            vertexCount = len(attachment.vertices)
                         else:
-                            vertexCount = len(attachment.attachment.vertices) / 3 * 2
+                            vertexCount = len(attachment.vertices) / 3 * 2
 
                         end = input.readInt(True)
                         if end == 0:
-                            if attachment.attachment.type == "mesh":
-                                vertices = attachment.attachment.vertices
+                            if attachment.type == "mesh":
+                                vertices = attachment.vertices
                             else:
                                 vertices = [0.0] * vertexCount
                         else:
@@ -550,8 +573,8 @@ def readAnimation(name, input, skeletonData, scale):
                             end += start
                             for v in range(start, end):
                                 vertices[v] = input.readFloat()
-                            if attachment.attachment.type == "mesh":
-                                meshVertices = attachment.attachment.vertices
+                            if attachment.type == "mesh":
+                                meshVertices = attachment.vertices
                                 for v in range(len(vertices)):
                                     vertices[v] = meshVertices[v]
                         timeline.times.append(time)
@@ -560,6 +583,8 @@ def readAnimation(name, input, skeletonData, scale):
                             timeline.curvews.append(readCurve(input))  
 
                     timelines.append(timeline)
+                    if frameCount > 0:
+                        duration = max(duration, timeline.times[-1])
 
         # Draw order timeline.        
         drawOrderCount = input.readInt(True)
@@ -597,6 +622,8 @@ def readAnimation(name, input, skeletonData, scale):
                 timeline.drawOrder.append(drawOrder)
 
             timelines.append(timeline)
+            if frameCount > 0:
+                duration = max(duration, timeline.times[-1])
 
         # Event timeline.
         print("Event timeline.")
@@ -620,8 +647,12 @@ def readAnimation(name, input, skeletonData, scale):
 
                 timeline.times.append(time)
                 timeline.events.append(event)
+                print("animation Event:", name, time, event, eventData)
 
             timelines.append(timeline)
+            if frameCount > 0:
+                duration = max(duration, timeline.times[-1])
+
 
     except Exception as e:
         print(e)
@@ -644,5 +675,17 @@ def readCurve(input):
             input.readFloat(),
         )
 
-
-print(json.dumps(readSkeletonData(input, 1.0), indent = 4, sort_keys = True))
+#filename = "/Users/lqefn/Documents/code/spine-runtimes/spine-libgdx/spine-libgdx-tests/assets/spineboy/spineboy.skel"
+spine_dirs = ["/Users/lqefn/Documents/work/ccplaying/Client/d1/res/image/spine/hero", "/Users/lqefn/Documents/work/ccplaying/Client/d1/res/image/spine/monster"]
+for d in spine_dirs:
+    subDirs = os.listdir(d)
+    for subDir in subDirs:
+        path = os.path.join(d, subDir, "skeleton.skel")
+        if os.path.exists(path):
+            try:
+                print("read:(%s)" % subDir)
+                input = DataInput(path)
+                readSkeletonData(input, 1.0)
+            except Exception as e:
+                print("read(%s) fail" % path, e)
+                traceback.print_exc()
